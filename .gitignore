@@ -1,0 +1,25 @@
+# Local secrets and runtime configuration
+config.json
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv311/
+venv/
+
+# Runtime files
+*.log
+*.pid
+
+# Local editor / agent settings
+.claude/
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
