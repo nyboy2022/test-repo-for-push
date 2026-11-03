@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 
 echo "========================================"
-echo "  Discord 消息转发 - 一键启动 (macOS)"
+echo "  Discord Channel Message Forwarder - 一键启动 (macOS)"
 echo "========================================"
 echo
 

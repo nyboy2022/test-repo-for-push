@@ -1,11 +1,11 @@
 @echo off
 chcp 65001 >nul
-title Discord 消息转发
+title Discord Channel Message Forwarder
 
 cd /d "%~dp0"
 
 echo ========================================
-echo   Discord 消息转发 - 一键启动
+echo   Discord Channel Message Forwarder - 一键启动
 echo ========================================
 echo.
 

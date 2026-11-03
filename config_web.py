@@ -1,5 +1,5 @@
 """
-Discord 消息转发 - Web 配置界面
+Discord Channel Message Forwarder - Web 配置界面
 访问 http://127.0.0.1:5151 在浏览器中编辑配置、启动/停止转发、查看实时日志
 """
 
@@ -139,7 +139,7 @@ INDEX_HTML = r"""
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Discord 消息转发 - 配置</title>
+<title>Discord Channel Message Forwarder - 配置</title>
 <style>
 :root {
   --bg: #0f1115;
@@ -217,7 +217,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 </head>
 <body>
 <div class="wrap">
-  <h1>Discord 消息转发 — 配置</h1>
+  <h1>Discord Channel Message Forwarder — 配置</h1>
   <div class="sub">在浏览器里编辑配置、启动 / 停止转发、查看实时日志</div>
 
   <div class="card">

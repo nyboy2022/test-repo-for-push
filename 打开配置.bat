@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Discord 消息转发 - 配置
+title Discord Channel Message Forwarder - 配置
 
 cd /d "%~dp0"
 

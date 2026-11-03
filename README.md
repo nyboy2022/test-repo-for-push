@@ -1,6 +1,8 @@
-# Discord 消息转发
+# Discord Channel Message Forwarder
 
-把指定 Discord 频道中的新消息转发到对应的 Discord Webhook。支持文字、附件链接、Embed、普通频道，以及按父频道规则匹配帖子/线程。
+Forward messages from channels in other Discord servers that your Discord account can access to webhooks you specify.
+
+主要功能：把你自己的 Discord 账号能够看到的、其他服务器频道里的消息，转发到你指定的 Webhook。支持文字、附件链接、Embed、普通频道，以及按父频道规则匹配帖子/线程。
 
 > [!CAUTION]
 > 这个版本使用 `discord.py-self` 和普通用户 Token，属于 self-bot。Discord 明确禁止自动化普通用户账号，检测到后可能暂停或永久终止账号。请先阅读下面的风险说明；更安全、合规的做法是改用官方 Bot 账号和 Bot API。

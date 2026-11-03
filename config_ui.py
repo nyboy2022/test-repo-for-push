@@ -1,5 +1,5 @@
 """
-Discord 消息转发 - 配置界面
+Discord Channel Message Forwarder - 配置界面
 支持：频道 -> Webhook 一对一映射
 """
 
@@ -43,7 +43,7 @@ def save_config(data: dict) -> bool:
 class ConfigApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Discord 消息转发 - 配置")
+        self.root.title("Discord Channel Message Forwarder - 配置")
         self.root.geometry("720x520")
         self.root.resizable(True, True)
         self.root.minsize(560, 450)
