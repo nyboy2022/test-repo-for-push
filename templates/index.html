@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Discord 转发管理后台</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:light dark;
+  --bg:#f4f5f7;--surface:#fff;--surface-2:#f0f1f4;--line:#dfe2e8;--line-strong:#c6cbd4;
+  --text:#1c2029;--muted:#626a78;--accent:#4752c4;--accent-text:#fff;--accent-soft:#e8eafb;
+  --good:#12784f;--good-soft:#e0f4ea;--bad:#b4232f;--bad-soft:#fce8ea;--warn:#8a5a00;--warn-soft:#fbf1da;
+  --log-bg:#14171d;--log-text:#c5ccd8;--shadow:0 1px 2px rgba(20,24,34,.06)}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#111318;--surface:#1a1d24;--surface-2:#23272f;--line:#2c313b;--line-strong:#404653;
+  --text:#e9ebf0;--muted:#9aa2b1;--accent:#7983ea;--accent-text:#10121a;--accent-soft:#262a4a;
+  --good:#4fd39b;--good-soft:#16332a;--bad:#ff8791;--bad-soft:#3a1d22;--warn:#efc266;--warn-soft:#352a14;
+  --log-bg:#0c0e12;--log-text:#c5ccd8;--shadow:none}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 "Segoe UI","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mono{font-family:Consolas,ui-monospace,"Cascadia Mono",monospace}
+.muted{color:var(--muted)}.small{font-size:12px}.hidden{display:none!important}
+
+/* Header */
+.top{position:sticky;top:0;z-index:20;background:var(--surface);border-bottom:1px solid var(--line)}
+.top-inner{max-width:1180px;margin:auto;padding:12px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.top h1{font-size:16px;font-weight:650;margin:0;margin-right:auto}
+.pill{display:inline-flex;align-items:center;gap:8px;font-weight:550}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+.dot.good{background:var(--good)}.dot.bad{background:var(--bad)}.dot.warn{background:var(--warn)}
+.controls{display:flex;gap:8px}
+nav{max-width:1180px;margin:auto;padding:0 24px;display:flex;gap:4px;overflow-x:auto}
+nav button{border:0;background:none;padding:9px 12px;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;font-weight:550}
+nav button:hover{color:var(--text)}
+nav button[aria-selected=true]{color:var(--text);border-color:var(--accent)}
+.count{display:inline-block;min-width:18px;padding:0 5px;margin-left:5px;border-radius:9px;background:var(--bad);color:#fff;font-size:11px;line-height:18px;text-align:center}
+
+/* Layout */
+main{max-width:1180px;margin:auto;padding:20px 24px 96px;min-width:0}
+.alerts{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+.alert{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 14px;border-radius:8px;background:var(--warn-soft);color:var(--warn)}
+.alert.bad{background:var(--bad-soft);color:var(--bad)}.alert.info{background:var(--accent-soft);color:var(--text)}
+.alert span{flex:1;min-width:220px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:18px}
+.panel+.panel{margin-top:16px}
+.panel h2{font-size:14px;font-weight:650;margin:0 0 12px}
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:6px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 16px;box-shadow:var(--shadow)}
+.stat span{display:block;font-size:12px;color:var(--muted)}
+.stat strong{display:block;font-size:24px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.3}
+.stat.bad strong{color:var(--bad)}
+.substat{margin:0 0 16px;color:var(--muted);font-size:12px}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:16px;align-items:start}
+.two .panel+.panel{margin-top:0}
+
+/* Controls */
+.btn{border:1px solid var(--line-strong);background:var(--surface);border-radius:7px;padding:6px 12px;cursor:pointer;font-weight:550;white-space:nowrap}
+.btn:hover{background:var(--surface-2)}.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}.btn.primary:hover{filter:brightness(1.08)}
+.btn.danger{color:var(--bad);border-color:var(--bad)}.btn.danger:hover{background:var(--bad-soft)}
+.btn.ghost{border-color:transparent;background:none;color:var(--muted)}.btn.ghost:hover{background:var(--surface-2);color:var(--text)}
+input[type=text],input[type=password],input[type=number],input[type=search],select{width:100%;background:var(--surface);border:1px solid var(--line-strong);border-radius:7px;padding:6px 10px;min-height:34px}
+input.invalid{border-color:var(--bad)}
+input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);flex:none;margin:0}
+label.field{display:block;margin-bottom:12px}
+label.field>span{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.toolbar input[type=search]{flex:1;min-width:180px;width:auto}
+.toolbar select{width:auto}
+.toolbar label{display:flex;align-items:center;gap:6px;white-space:nowrap}
+
+/* Badges */
+.badge{display:inline-block;padding:1px 8px;border-radius:9px;font-size:12px;font-weight:550;background:var(--surface-2);color:var(--muted);white-space:nowrap}
+.badge.good{background:var(--good-soft);color:var(--good)}.badge.bad{background:var(--bad-soft);color:var(--bad)}.badge.warn{background:var(--warn-soft);color:var(--warn)}
+
+/* Tables */
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{font-size:12px;font-weight:550;color:var(--muted);text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.rule-table td:nth-child(1){width:130px}.rule-table td:nth-child(2){width:230px}.rule-table td:nth-child(4){width:88px;text-align:center}.rule-table td:nth-child(5){width:44px}
+.rule-table th:nth-child(4){text-align:center}
+.rule-table input.note{margin-top:5px;font-size:12px;min-height:28px;padding:3px 8px}
+.hook-line{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-height:34px}
+.hook-name{font-weight:550;overflow-wrap:anywhere}
+.hook-detail{font-size:12px;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}
+.link{border:0;background:none;padding:0;color:var(--accent);cursor:pointer;font-size:12px}
+.link:hover{text-decoration:underline}
+.empty{padding:28px 12px;text-align:center;color:var(--muted)}
+
+/* Accounts */
+.account-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
+.account-grid .panel{margin:0}
+.account-title{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+.account-title .who{font-weight:650;margin-right:auto;overflow-wrap:anywhere}
+.account-facts{font-size:12px;color:var(--muted);margin-bottom:12px}
+.account-error{font-size:12px;color:var(--bad);margin:-6px 0 12px;overflow-wrap:anywhere}
+.field-inline{display:flex;gap:8px;margin:0}
+.row-account{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)}
+.row-account:last-child{border-bottom:0}
+
+/* Settings */
+.option{display:flex;gap:10px;padding:9px 0;align-items:flex-start;cursor:pointer}
+.option input{margin-top:3px}
+.option b{font-weight:550;display:block}
+.option small{color:var(--muted);font-size:12px;display:block}
+.numbers{display:grid;grid-template-columns:repeat(2,minmax(0,200px));gap:16px;margin-top:10px}
+dl{display:grid;grid-template-columns:90px minmax(0,1fr);gap:6px 12px;margin:0;font-size:13px}
+dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
+
+/* Logs */
+.log{background:var(--log-bg);color:var(--log-text);border-radius:8px;padding:12px;font:12px/1.65 Consolas,ui-monospace,monospace;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.log.full{height:60vh;min-height:320px}
+.log.short{max-height:210px}
+.log .ok{color:#6fdcaa}.log .warning{color:#efc266}.log .error{color:#ff9aa3}.log .sys{color:#9db0ff}
+.segmented{display:inline-flex;border:1px solid var(--line-strong);border-radius:7px;overflow:hidden}
+.segmented button{border:0;background:none;padding:6px 11px;cursor:pointer;color:var(--muted)}
+.segmented button[aria-pressed=true]{background:var(--accent-soft);color:var(--text);font-weight:550}
+
+/* Save bar, toast, dialog */
+.savebar{position:fixed;left:0;right:0;bottom:0;z-index:15;background:var(--surface);border-top:1px solid var(--line-strong);padding:10px 24px;display:flex;justify-content:center;gap:10px;align-items:center;flex-wrap:wrap}
+.savebar span{margin-right:12px;font-weight:550}
+.toast{position:fixed;right:20px;bottom:70px;z-index:30;max-width:min(420px,calc(100vw - 40px));padding:10px 14px;background:var(--surface);border:1px solid var(--good);border-left-width:4px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.2)}
+.toast.bad{border-color:var(--bad)}
+dialog{background:var(--surface);color:var(--text);border:1px solid var(--line-strong);border-radius:10px;padding:20px;max-width:400px;width:calc(100% - 32px)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+dialog h3{margin:0 0 8px;font-size:15px}
+dialog p{margin:0 0 16px;color:var(--muted)}
+.dialog-actions{display:flex;justify-content:flex-end;gap:8px}
+
+@media (max-width:860px){
+  .top-inner,nav,main{padding-left:16px;padding-right:16px}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .two{grid-template-columns:minmax(0,1fr)}
+  .two .panel+.panel{margin-top:16px}
+  .account-grid{grid-template-columns:minmax(0,1fr)}
+  .numbers{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .rule-table thead{display:none}
+  .rule-table,.rule-table tbody,.rule-table tr,.rule-table td{display:block;width:auto!important}
+  .rule-table tr{border:1px solid var(--line);border-radius:8px;padding:6px;margin-bottom:10px}
+  .rule-table td{border:0;padding:6px;text-align:left!important}
+  .rule-table td[data-label]::before{content:attr(data-label);display:block;font-size:12px;color:var(--muted);margin-bottom:3px}
+}
+@media (prefers-reduced-motion:no-preference){.toast{animation:rise .16s ease-out}@keyframes rise{from{opacity:0;transform:translateY(6px)}}}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="top-inner">
+    <h1>Discord 转发管理后台</h1>
+    <span class="pill" role="status"><i id="dot" class="dot"></i><span id="state">正在读取状态…</span></span>
+    <div class="controls" id="controls"></div>
+  </div>
+  <nav role="tablist" aria-label="页面">
+    <button role="tab" data-tab="overview">概览</button>
+    <button role="tab" data-tab="rules">转发规则<span id="ruleProblems" class="count hidden"></span></button>
+    <button role="tab" data-tab="accounts">账号<span id="accountProblems" class="count hidden"></span></button>
+    <button role="tab" data-tab="settings">设置</button>
+    <button role="tab" data-tab="logs">日志</button>
+  </nav>
+</header>
+
+<main>
+  <div id="alerts" class="alerts"></div>
+
+  <section data-view="overview">
+    <div class="stats">
+      <div class="stat"><span>已转发</span><strong id="forwarded">—</strong></div>
+      <div class="stat" id="failedTile"><span>投递失败</span><strong id="failed">—</strong></div>
+      <div class="stat" id="droppedTile"><span>队列满丢弃</span><strong id="dropped">—</strong></div>
+      <div class="stat"><span>排队中</span><strong id="queue">—</strong></div>
+      <div class="stat"><span>运行时长</span><strong id="uptime">—</strong></div>
+    </div>
+    <p class="substat" id="substat"></p>
+    <div class="two">
+      <div class="panel"><h2>账号连接</h2><div id="accountSummary"></div></div>
+      <div class="panel"><h2>投递目标</h2><div class="table-wrap" id="deliverySummary"></div></div>
+    </div>
+    <div class="panel" style="margin-top:16px"><h2>最近日志</h2><div id="logShort" class="log short"></div></div>
+  </section>
+
+  <section data-view="rules" class="hidden">
+    <div class="panel">
+      <div class="toolbar">
+        <input type="search" id="ruleSearch" placeholder="搜索频道 ID、备注或 Webhook 名称" aria-label="搜索规则">
+        <select id="ruleAccountFilter" aria-label="按账号筛选"></select>
+        <label><input type="checkbox" id="ruleProblemsOnly">只看异常</label>
+        <button class="btn" data-action="check" id="checkBtn">检测 Webhook</button>
+        <button class="btn primary" data-action="add-rule">添加规则</button>
+      </div>
+      <div class="table-wrap"><table class="rule-table">
+        <thead><tr><th>账号</th><th>来源频道或分类 ID</th><th>目标 Webhook</th><th title="转发机器人和 Webhook 发出的消息">自动消息</th><th></th></tr></thead>
+        <tbody id="ruleRows"></tbody>
+      </table></div>
+      <div id="ruleEmpty" class="empty hidden">没有符合条件的规则</div>
+      <p class="muted small" style="margin:12px 0 0">分类 ID 会覆盖其下所有子频道，子频道有单独规则时优先用子频道的。“检测 Webhook”只读取信息，不会向频道发消息。</p>
+    </div>
+  </section>
+
+  <section data-view="accounts" class="hidden">
+    <div class="toolbar"><button class="btn primary" data-action="add-account">添加账号</button></div>
+    <div id="accountCards" class="account-grid"></div>
+    <p class="muted small" style="margin-top:16px">Discord 禁止自动化普通用户账号，使用 User Token 可能导致账号被封。Token 只保存在本机 config.json，页面不会回显明文。</p>
+  </section>
+
+  <section data-view="settings" class="hidden">
+    <div class="two">
+      <div class="panel">
+        <h2>运行选项</h2>
+        <label class="option"><input type="checkbox" id="ignoreBots"><span><b>忽略机器人消息</b><small>规则单独开启“自动消息”时除外</small></span></label>
+        <label class="option"><input type="checkbox" id="autoStart"><span><b>打开后台时自动开始转发</b><small>手动停止过的，下次打开不会自动开始</small></span></label>
+        <label class="option"><input type="checkbox" id="autoRestart"><span><b>异常退出后自动重启</b><small>连续 3 次快速失败时会暂停，避免反复重启</small></span></label>
+        <label class="option"><input type="checkbox" id="debug"><span><b>调试日志</b><small>会把所有服务器的完整消息写入日志，排查完请关闭</small></span></label>
+        <div class="numbers">
+          <label class="field"><span>单次投递重试次数（0–10）</span><input type="number" id="maxRetries" min="0" max="10"></label>
+          <label class="field"><span>每个目标的队列容量（10–5000）</span><input type="number" id="queueSize" min="10" max="5000"></label>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>运行环境</h2>
+        <dl id="diagnostics"></dl>
+        <button class="btn" style="margin-top:14px" data-action="diagnostics">刷新</button>
+      </div>
+    </div>
+  </section>
+
+  <section data-view="logs" class="hidden">
+    <div class="panel">
+      <div class="toolbar">
+        <input type="search" id="logSearch" placeholder="搜索日志" aria-label="搜索日志">
+        <div class="segmented" id="logLevels" role="group" aria-label="日志类型">
+          <button data-level="all" aria-pressed="true">全部</button>
+          <button data-level="ok" aria-pressed="false">转发</button>
+          <button data-level="warning" aria-pressed="false">警告</button>
+          <button data-level="error" aria-pressed="false">错误</button>
+        </div>
+        <label><input type="checkbox" id="logFollow" checked>跟随最新</label>
+        <button class="btn" data-action="clear-log">清空显示</button>
+      </div>
+      <div id="log" class="log full" role="log" aria-live="off" tabindex="0"></div>
+      <p class="muted small" style="margin:10px 0 0">这里显示本次打开后台以来的日志，密钥已隐藏。完整记录在 forwarder.log，超过 20 MB 自动轮转，保留 5 份。</p>
+    </div>
+  </section>
+</main>
+
+<div id="savebar" class="savebar hidden" role="region" aria-label="未保存的修改">
+  <span>有未保存的修改</span>
+  <button class="btn" data-action="discard">放弃</button>
+  <button class="btn primary" data-action="save">保存配置</button>
+</div>
+<div id="toast" class="toast hidden" role="status"></div>
+<dialog id="confirm"><h3 id="confirmTitle"></h3><p id="confirmText"></p><div class="dialog-actions"><button class="btn" id="confirmNo">取消</button><button class="btn danger" id="confirmYes">确定</button></div></dialog>
+
+<script>
+const ADMIN_TOKEN={{ admin_token|tojson }};
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+const LOG_LIMIT=1500,SHORT_LOG_LIMIT=8;
+const state={accounts:[],rules:[],checks:{},status:null,dirty:false,nextKey:1,logSeq:0,logs:[],logLevel:'all',busy:false};
+
+function esc(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+function num(v){return Number(v||0).toLocaleString('zh-CN')}
+function ago(ts){if(!ts)return'暂无';const s=Math.max(0,Date.now()/1000-ts);if(s<60)return'刚刚';if(s<3600)return`${Math.floor(s/60)} 分钟前`;if(s<86400)return`${Math.floor(s/3600)} 小时前`;return`${Math.floor(s/86400)} 天前`}
+function duration(s){if(!s)return'—';s=Math.max(0,Math.floor(s));const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d}天 ${h}时`:h?`${h}时 ${m}分`:`${m}分 ${s%60}秒`}
+function bytes(n){return n>=1048576?`${(n/1048576).toFixed(1)} MB`:`${Math.ceil(n/1024)} KB`}
+
+async function api(url,options={}){
+  options.headers={...(options.headers||{}),'Content-Type':'application/json','X-Admin-Token':ADMIN_TOKEN};
+  let r;try{r=await fetch(url,options)}catch(_){throw new Error('无法连接管理后台，请确认后台窗口仍在运行')}
+  let d={};try{d=await r.json()}catch(_){throw new Error(`后台返回异常（HTTP ${r.status}）`)}
+  if(!r.ok||!d.ok)throw new Error(d.error||`HTTP ${r.status}`);return d}
+function toast(text,bad=false){const e=$('#toast');e.textContent=text;e.className=bad?'toast bad':'toast';clearTimeout(e._t);e._t=setTimeout(()=>e.classList.add('hidden'),bad?7000:3500)}
+function confirmDialog(title,text,yes){return new Promise(resolve=>{const d=$('#confirm');$('#confirmTitle').textContent=title;$('#confirmText').textContent=text;$('#confirmYes').textContent=yes;
+  const done=v=>{d.close();$('#confirmYes').onclick=$('#confirmNo').onclick=d.oncancel=null;resolve(v)};
+  $('#confirmYes').onclick=()=>done(true);$('#confirmNo').onclick=()=>done(false);d.oncancel=e=>{e.preventDefault();done(false)};d.showModal();$('#confirmNo').focus()})}
+
+/* Tabs */
+function showTab(name){if(!$(`[data-view="${name}"]`))name='overview';
+  $$('[data-view]').forEach(v=>v.classList.toggle('hidden',v.dataset.view!==name));
+  $$('nav button').forEach(b=>b.setAttribute('aria-selected',b.dataset.tab===name));
+  try{history.replaceState(null,'','#'+name)}catch(_){}
+  if(name==='logs')scrollLog();if(name==='settings')loadDiagnostics()}
+
+/* Config */
+function setDirty(v=true){state.dirty=v;$('#savebar').classList.toggle('hidden',!v)}
+async function loadConfig(){const {config:c}=await api('/api/config');
+  state.accounts=c.accounts.map(a=>({...a,user_token:''}));
+  state.rules=c.forward_rules.map(r=>({...r,key:state.nextKey++,webhook_url:'',editing:false}));
+  $('#debug').checked=c.debug;$('#ignoreBots').checked=c.options.ignore_bots;$('#autoRestart').checked=c.options.auto_restart;$('#autoStart').checked=c.options.auto_start;$('#maxRetries').value=c.options.max_retries;$('#queueSize').value=c.options.queue_size;
+  renderAccountFilter();renderRules();renderAccounts();renderOverview();setDirty(false)}
+function validate(){
+  for(const r of state.rules){if(!/^\d+$/.test(r.channel_id))return`来源 ID“${r.channel_id||'空'}”必须是数字`;
+    if(!r.webhook_configured&&!r.webhook_url)return`来源 ${r.channel_id} 还没有填写 Webhook`}
+  return''}
+async function saveConfig(){const problem=validate();if(problem){showTab('rules');return toast(problem,true)}
+  const body={accounts:state.accounts.map(a=>({id:a.id,name:a.name.trim(),user_token:a.user_token.trim()})),
+    forward_rules:state.rules.map(r=>({account_id:r.account_id,channel_id:r.channel_id.trim(),note:r.note,webhook_url:r.webhook_url.trim(),allow_automated:r.allow_automated})),
+    debug:$('#debug').checked,options:{ignore_bots:$('#ignoreBots').checked,auto_restart:$('#autoRestart').checked,auto_start:$('#autoStart').checked,max_retries:+$('#maxRetries').value,queue_size:+$('#queueSize').value}};
+  try{await api('/api/config',{method:'PUT',body:JSON.stringify(body)});await loadConfig();toast('配置已保存');refreshStatus();checkWebhooks(true)}catch(e){toast(e.message,true)}}
+
+/* Rule health */
+function ruleHealth(r){
+  if(r.webhook_url)return{cls:'warn',label:'保存后生效'};
+  if(!r.webhook_configured)return{cls:'bad',label:'未填写',problem:true};
+  const check=state.checks[r.webhook_id],run=(state.status?.runtime?.webhooks||{})[r.webhook_id];
+  if(check&&!check.ok&&[401,403,404].includes(check.status))return{cls:'bad',label:'已失效',detail:`Discord 返回 HTTP ${check.status}，需要重新创建 Webhook`,problem:true};
+  if(run&&!run.ok)return{cls:'bad',label:'投递失败',detail:run.last_error,problem:true};
+  if(check?.loop_risk)return{cls:'warn',label:'目标也是来源',detail:'目标频道同时是一条规则的来源。程序会跳过自己发出的消息，不会循环，但该频道其他人的消息也会被转发'};
+  if(check&&!check.ok)return{cls:'warn',label:'无法检测',detail:check.error};
+  if(check?.ok||run?.ok)return{cls:'good',label:'正常'};
+  return{cls:'',label:'未检测'}}
+function hookName(r){const check=state.checks[r.webhook_id];return check?.name||(r.webhook_id?`Webhook ${r.webhook_id}`:'新 Webhook')}
+function healthHtml(r){const h=ruleHealth(r),run=(state.status?.runtime?.webhooks||{})[r.webhook_id];
+  const count=run?`<span class="muted small">本次 ${num(run.forwarded)} 条${run.failures?` · 失败 ${num(run.failures)}`:''}</span>`:'';
+  return`<div class="hook-line"><span class="hook-name">${esc(hookName(r))}</span><span class="badge ${h.cls}">${esc(h.label)}</span>${count}<button class="link" data-rule-action="edit-hook">更换</button></div>${h.detail?`<div class="hook-detail">${esc(h.detail)}</div>`:''}`}
+function accountName(id){return state.accounts.find(a=>a.id===id)?.name||id}
+
+/* Rules view */
+function renderAccountFilter(){const s=$('#ruleAccountFilter'),v=s.value;s.innerHTML=`<option value="">全部账号</option>`+state.accounts.map(a=>`<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');s.value=state.accounts.some(a=>a.id===v)?v:''}
+function visibleRules(){const q=$('#ruleSearch').value.trim().toLowerCase(),acc=$('#ruleAccountFilter').value,only=$('#ruleProblemsOnly').checked;
+  return state.rules.filter(r=>(!acc||r.account_id===acc)&&(!only||ruleHealth(r).problem)&&(!q||[r.channel_id,r.note,hookName(r),accountName(r.account_id)].join(' ').toLowerCase().includes(q)))}
+function renderRules(){const rows=visibleRules(),options=id=>state.accounts.map(a=>`<option value="${esc(a.id)}" ${a.id===id?'selected':''}>${esc(a.name)}</option>`).join('');
+  $('#ruleRows').innerHTML=rows.map(r=>{const showInput=r.editing||!r.webhook_configured;return`<tr data-key="${r.key}">
+    <td data-label="账号"><select class="r-account" aria-label="账号">${options(r.account_id)}</select></td>
+    <td data-label="来源频道或分类 ID"><input type="text" class="r-channel mono ${r.channel_id&&!/^\d+$/.test(r.channel_id)?'invalid':''}" inputmode="numeric" value="${esc(r.channel_id)}" placeholder="例如 123456789012345678" aria-label="来源 ID"><input type="text" class="note r-note" maxlength="60" value="${esc(r.note)}" placeholder="备注（可选）" aria-label="备注"></td>
+    <td data-label="目标 Webhook"><div class="r-health ${showInput?'hidden':''}">${healthHtml(r)}</div>${showInput?`<input type="password" class="r-hook" autocomplete="off" value="${esc(r.webhook_url)}" placeholder="粘贴 Webhook URL" aria-label="Webhook URL">${r.webhook_configured?`<button class="link" data-rule-action="cancel-hook" style="margin-top:4px">保留现有的 ${esc(r.webhook_hint)}</button>`:''}`:''}</td>
+    <td data-label="转发机器人和 Webhook 消息"><input type="checkbox" class="r-auto" ${r.allow_automated?'checked':''} aria-label="转发自动消息"></td>
+    <td><button class="btn ghost" data-rule-action="remove" title="删除规则" aria-label="删除规则">✕</button></td></tr>`}).join('');
+  $('#ruleEmpty').classList.toggle('hidden',rows.length>0)}
+function ruleFromEvent(e){const row=e.target.closest('tr[data-key]');return row&&state.rules.find(r=>r.key===+row.dataset.key)}
+function updateRuleHealth(){$$('#ruleRows tr[data-key]').forEach(row=>{const r=state.rules.find(x=>x.key===+row.dataset.key),box=row.querySelector('.r-health');if(!r||!box)return;const html=healthHtml(r);if(box._html!==html){box.innerHTML=html;box._html=html}})}
+$('#ruleRows').addEventListener('input',e=>{const r=ruleFromEvent(e);if(!r)return;const t=e.target;
+  if(t.matches('.r-channel')){r.channel_id=t.value.trim();t.classList.toggle('invalid',!!r.channel_id&&!/^\d+$/.test(r.channel_id))}
+  else if(t.matches('.r-note'))r.note=t.value;else if(t.matches('.r-hook'))r.webhook_url=t.value;else if(t.matches('.r-auto'))r.allow_automated=t.checked;else if(t.matches('.r-account'))r.account_id=t.value;else return;setDirty()});
+$('#ruleRows').addEventListener('click',e=>{const action=e.target.dataset.ruleAction;if(!action)return;const r=ruleFromEvent(e);if(!r)return;
+  if(action==='remove'){state.rules=state.rules.filter(x=>x!==r);setDirty()}
+  if(action==='edit-hook'){r.editing=true}
+  if(action==='cancel-hook'){r.editing=false;r.webhook_url=''}
+  renderRules();renderOverview()});
+['#ruleSearch','#ruleAccountFilter','#ruleProblemsOnly'].forEach(s=>$(s).addEventListener('input',renderRules));
+
+/* Accounts view */
+function renderAccounts(){const accs=state.status?.runtime?.accounts||{},running=state.status?.running;
+  $('#accountCards').innerHTML=state.accounts.map(a=>{const run=accs[a.id]||{},count=state.rules.filter(r=>r.account_id===a.id).length;
+    const badge=!running?'<span class="badge">未运行</span>':run.connected?'<span class="badge good">已连接</span>':'<span class="badge bad">未连接</span>';
+    return`<div class="panel" data-account="${esc(a.id)}"><div class="account-title"><span class="who">${esc(a.name||'未命名账号')}</span>${badge}</div>
+    <div class="account-facts">${run.account?`Discord 用户 ${esc(run.account)} · ${num(run.guilds)} 个服务器 · `:''}${count} 条规则</div>
+    ${run.last_error?`<div class="account-error">${esc(run.last_error)}</div>`:''}
+    <label class="field"><span>显示名称</span><input type="text" class="a-name" maxlength="40" value="${esc(a.name)}"></label>
+    <label class="field"><span>User Token ${a.token_configured?`（当前 ${esc(a.token_hint)}，留空不变）`:'（必填）'}</span><div class="field-inline"><input type="password" class="a-token" autocomplete="off" value="${esc(a.user_token)}"><button class="btn a-show" type="button">显示</button></div></label>
+    <button class="btn danger a-remove">删除账号</button></div>`}).join('')}
+function accountFromEvent(e){const card=e.target.closest('[data-account]');return card&&state.accounts.find(a=>a.id===card.dataset.account)}
+$('#accountCards').addEventListener('input',e=>{const a=accountFromEvent(e);if(!a)return;
+  if(e.target.matches('.a-name')){a.name=e.target.value;e.target.closest('[data-account]').querySelector('.who').textContent=a.name||'未命名账号';renderAccountFilter();renderRules()}
+  else if(e.target.matches('.a-token'))a.user_token=e.target.value;else return;setDirty()});
+$('#accountCards').addEventListener('click',e=>{const a=accountFromEvent(e);if(!a)return;
+  if(e.target.matches('.a-show')){e.preventDefault();const i=e.target.parentElement.querySelector('input');const hide=i.type==='text';i.type=hide?'password':'text';e.target.textContent=hide?'显示':'隐藏'}
+  if(e.target.matches('.a-remove')){if(state.accounts.length<=1)return toast('至少保留一个账号',true);
+    const used=state.rules.filter(r=>r.account_id===a.id).length;if(used)return toast(`还有 ${used} 条规则属于这个账号，请先改到其他账号或删除`,true);
+    state.accounts=state.accounts.filter(x=>x!==a);setDirty();renderAccounts();renderAccountFilter();renderRules()}});
+
+/* Overview */
+function renderOverview(){const d=state.status;if(!d)return;const r=d.runtime||{},live=d.running;
+  $('#forwarded').textContent=num(r.forwarded);$('#failed').textContent=num(r.failed);$('#dropped').textContent=num(r.dropped);$('#queue').textContent=num(r.queue_depth);$('#uptime').textContent=live?duration(Date.now()/1000-d.started_at):'—';
+  $('#failedTile').classList.toggle('bad',(r.failed||0)>0);$('#droppedTile').classList.toggle('bad',(r.dropped||0)>0);
+  $('#substat').textContent=`共收到 ${num(r.received)} 条消息，其中只有符合规则的才会转发 · 最后转发：${ago(r.last_forward_at)}${r.updated_at?` · 状态更新于 ${ago(r.updated_at)}`:''}`;
+  const accs=r.accounts||{};
+  const summary=state.accounts.map(a=>{const x=accs[a.id]||{},badge=!live?'<span class="badge">未运行</span>':x.connected?'<span class="badge good">已连接</span>':'<span class="badge bad">未连接</span>';
+    return`<div class="row-account"><div><b style="font-weight:550">${esc(a.name)}</b><div class="small muted">${x.account?`${esc(x.account)} · ${num(x.guilds)} 个服务器`:'等待登录'}</div>${x.last_error?`<div class="small" style="color:var(--bad)">${esc(x.last_error)}</div>`:''}</div><div>${badge}</div></div>`}).join('');
+  if($('#accountSummary')._h!==summary){$('#accountSummary').innerHTML=summary;$('#accountSummary')._h=summary}
+  const groups=new Map();state.rules.forEach(rule=>{const k=rule.webhook_id||`new${rule.key}`;if(!groups.has(k))groups.set(k,[]);groups.get(k).push(rule)});
+  const order={bad:0,warn:1,good:2,'':3},rows=[...groups.values()].map(list=>({list,h:ruleHealth(list[0]),run:(r.webhooks||{})[list[0].webhook_id]})).sort((a,b)=>order[a.h.cls]-order[b.h.cls]||(b.run?.forwarded||0)-(a.run?.forwarded||0));
+  const table=`<table><thead><tr><th>目标</th><th>状态</th><th class="num">规则</th><th class="num">本次转发</th><th>最后成功</th></tr></thead><tbody>${rows.map(({list,h,run})=>`<tr><td><span class="hook-name">${esc(hookName(list[0]))}</span></td><td><span class="badge ${h.cls}">${esc(h.label)}</span></td><td class="num">${list.length}</td><td class="num">${num(run?.forwarded)}</td><td class="small muted">${ago(run?.last_ok_at)}</td></tr>`).join('')}</tbody></table>`;
+  if($('#deliverySummary')._h!==table){$('#deliverySummary').innerHTML=table;$('#deliverySummary')._h=table}
+}
+function renderAlerts(){const d=state.status,list=[];if(d){const r=d.runtime||{},now=Date.now()/1000;
+  if(d.restart_blocked)list.push(['bad',`转发进程连续快速失败，自动重启已暂停${d.exit_message?`：${d.exit_message}`:'，请查看日志'}`,'start','重新启动']);
+  else if(!d.running)list.push(['warn',d.exit_message?`转发已停止：${d.exit_message}`:'转发已停止，新消息不会被转发','start','启动']);
+  if(d.running&&r.stale)list.push(['bad','转发进程超过 30 秒没有更新状态，可能已卡住','restart','重启']);
+  if(d.restart_required)list.push(['info','配置已保存，重启转发进程后生效','restart','立即重启']);
+  const bad=state.rules.filter(x=>ruleHealth(x).problem&&ruleHealth(x).cls==='bad');
+  if(bad.length)list.push(['bad',`${bad.length} 条规则的目标 Webhook 不可用，这些频道的消息转发不出去`,'show-problems','查看']);
+  const dead=Object.values(r.accounts||{}).filter(a=>a.last_error);
+  if(d.running&&dead.length)list.push(['bad',`${dead.length} 个账号连接异常：${dead[0].last_error}`,'show-accounts','查看']);
+  if((r.dropped||0)>0&&now-(r.last_error_at||0)<3600)list.push(['warn',`有 ${num(r.dropped)} 条消息因队列已满被丢弃`,'show-logs','查看日志'])}
+  const html=list.map(([cls,text,action,label])=>`<div class="alert ${cls==='warn'?'':cls}"><span>${esc(text)}</span><button class="btn" data-action="${action}">${esc(label)}</button></div>`).join('');
+  if($('#alerts')._h!==html){$('#alerts').innerHTML=html;$('#alerts')._h=html}
+  const ruleCount=state.rules.filter(x=>ruleHealth(x).problem).length,badge=$('#ruleProblems');badge.textContent=ruleCount;badge.classList.toggle('hidden',!ruleCount);
+  const accCount=d?.running?Object.values(d.runtime?.accounts||{}).filter(a=>a.last_error||!a.connected).length:0,acc=$('#accountProblems');acc.textContent=accCount;acc.classList.toggle('hidden',!accCount)}
+function renderHeader(){const d=state.status;if(!d)return;const r=d.runtime||{},dot=$('#dot');let text,cls;
+  if(!d.running){text=d.restart_blocked?'已停止 · 自动重启已暂停':'已停止';cls=d.restart_blocked?'bad':''}
+  else if(r.stale){text='运行中 · 状态未更新';cls='bad'}
+  else if(r.connected){text=`运行中 · ${Object.keys(r.accounts||{}).length} 个账号已连接`;cls='good'}
+  else{const a=Object.values(r.accounts||{}),on=a.filter(x=>x.connected).length;text=`运行中 · ${on}/${a.length} 个账号已连接`;cls='warn'}
+  dot.className=`dot ${cls}`;$('#state').textContent=text;
+  const html=d.running?`<button class="btn" data-action="restart">重启</button><button class="btn danger" data-action="stop">停止</button>`:`<button class="btn primary" data-action="start">启动转发</button>`;
+  if($('#controls')._h!==html){$('#controls').innerHTML=html;$('#controls')._h=html}
+  $$('#controls .btn').forEach(b=>b.disabled=state.busy)}
+async function refreshStatus(){try{state.status=await api('/api/status');renderHeader();renderOverview();renderAlerts();updateRuleHealth();
+    if(!document.activeElement?.closest('#accountCards'))renderAccountsIfChanged()}
+  catch(e){$('#state').textContent='后台连接失败';$('#dot').className='dot bad'}}
+let accountStatusKey='';function renderAccountsIfChanged(){const key=JSON.stringify([state.status?.running,state.status?.runtime?.accounts]);if(key!==accountStatusKey){accountStatusKey=key;renderAccounts()}}
+
+/* Actions */
+async function processAction(action){
+  if(action==='stop'&&!await confirmDialog('停止转发？','停止后新消息不会被转发，下次打开后台也不会自动开始。','停止转发'))return;
+  state.busy=true;renderHeader();try{await api(`/api/process/${action}`,{method:'POST'});toast({start:'已启动',stop:'已停止',restart:'已重启'}[action])}catch(e){toast(e.message,true)}finally{state.busy=false;await refreshStatus()}}
+async function checkWebhooks(silent=false){const b=$('#checkBtn');b.disabled=true;const old=b.textContent;b.textContent='检测中…';
+  try{const d=await api('/api/webhooks/check',{method:'POST'});state.checks=d.results;renderRules();renderOverview();renderAlerts();if(!silent){const bad=Object.values(d.results).filter(x=>!x.ok).length;toast(bad?`检测完成，${bad} 个 Webhook 有问题`:'检测完成，全部可用',bad>0)}}
+  catch(e){if(!silent)toast(e.message,true)}finally{b.disabled=false;b.textContent=old}}
+async function loadDiagnostics(){try{const {diagnostics:d}=await api('/api/diagnostics');
+  $('#diagnostics').innerHTML=[['Python',d.python],['配置',`${d.config_readable?'可读取':'缺失'} · ${d.account_count} 个账号 · ${d.rule_count} 条规则`],['Token',d.token_configured?'已配置':'未配置'],['日志大小',bytes(d.log_bytes)],['项目目录',d.base_dir],['平台',d.platform]].map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}catch(e){toast(e.message,true)}}
+
+/* Logs */
+function logClass(t){if(/\bERROR\b|\bCRITICAL\b|失败|Traceback|Error:/.test(t))return'error';if(/\bWARNING\b/.test(t))return'warning';if(/转发成功/.test(t))return'ok';if(/\[管理端\]/.test(t))return'sys';return''}
+function logMatches(x){const level=state.logLevel,q=$('#logSearch').value.trim().toLowerCase();return(level==='all'||x.cls===level)&&(!q||x.text.toLowerCase().includes(q))}
+function logNode(x){const n=document.createElement('div');n.className=x.cls;n.textContent=`${x.time} ${x.text}`;return n}
+function scrollLog(){if($('#logFollow').checked){const b=$('#log');b.scrollTop=b.scrollHeight}}
+function renderLogs(){const b=$('#log');b.replaceChildren(...state.logs.filter(logMatches).map(logNode));scrollLog()}
+function renderShortLog(){const b=$('#logShort');b.replaceChildren(...state.logs.slice(-SHORT_LOG_LIMIT).map(logNode));b.scrollTop=b.scrollHeight;if(!state.logs.length)b.textContent='还没有日志'}
+async function pollLogs(){if(document.hidden)return;try{const d=await api(`/api/logs?since=${state.logSeq}`);if(!d.lines.length)return;const b=$('#log');
+    d.lines.forEach(x=>{x.cls=logClass(x.text);state.logs.push(x);state.logSeq=Math.max(state.logSeq,x.seq);if(logMatches(x))b.append(logNode(x))});
+    if(state.logs.length>LOG_LIMIT){state.logs=state.logs.slice(-LOG_LIMIT);renderLogs()}else scrollLog();renderShortLog()}catch(_){}}
+$('#logSearch').addEventListener('input',renderLogs);
+$('#logLevels').addEventListener('click',e=>{const level=e.target.dataset.level;if(!level)return;state.logLevel=level;$$('#logLevels button').forEach(b=>b.setAttribute('aria-pressed',b===e.target));renderLogs()});
+
+/* Global wiring */
+document.addEventListener('click',async e=>{
+  const tab=e.target.closest('[data-tab]');if(tab)return showTab(tab.dataset.tab);
+  const button=e.target.closest('[data-action]');if(!button)return;const action=button.dataset.action;
+  if(['start','stop','restart'].includes(action))return processAction(action);
+  if(action==='check')return checkWebhooks();
+  if(action==='save')return saveConfig();
+  if(action==='discard'){await loadConfig();return toast('已放弃修改')}
+  if(action==='diagnostics')return loadDiagnostics();
+  if(action==='clear-log'){state.logs=[];renderLogs();renderShortLog();return}
+  if(action==='show-problems'){$('#ruleProblemsOnly').checked=true;renderRules();return showTab('rules')}
+  if(action==='show-accounts')return showTab('accounts');
+  if(action==='show-logs')return showTab('logs');
+  if(action==='add-rule'){$('#ruleSearch').value='';$('#ruleProblemsOnly').checked=false;$('#ruleAccountFilter').value='';const r={key:state.nextKey++,account_id:state.accounts[0]?.id||'',channel_id:'',note:'',webhook_id:'',webhook_configured:false,webhook_hint:'',webhook_url:'',allow_automated:false,editing:false};state.rules.push(r);setDirty();renderRules();$(`tr[data-key="${r.key}"] .r-channel`).focus();return}
+  if(action==='add-account'){const id=`account_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,7)}`;state.accounts.push({id,name:'新账号',token_configured:false,token_hint:'',user_token:''});setDirty();renderAccounts();renderAccountFilter();renderRules();return}
+});
+['#debug','#ignoreBots','#autoRestart','#autoStart','#maxRetries','#queueSize'].forEach(s=>$(s).addEventListener('input',()=>setDirty()));
+window.addEventListener('hashchange',()=>showTab(location.hash.slice(1)));
+window.addEventListener('beforeunload',e=>{if(state.dirty){e.preventDefault();e.returnValue=''}});
+showTab(location.hash.slice(1)||'overview');renderShortLog();
+loadConfig().then(()=>{refreshStatus();checkWebhooks(true)}).catch(e=>toast(e.message,true));
+setInterval(()=>{if(!document.hidden)refreshStatus()},2000);setInterval(pollLogs,1000);pollLogs();
+</script>
+</body>
+</html>

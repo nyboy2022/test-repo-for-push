@@ -29,8 +29,5 @@ python -m pip install --upgrade pip >/dev/null 2>&1 || true
 echo "正在检查/安装依赖..."
 pip install -r requirements.txt
 
-echo "正在打开配置界面（失败会自动打开 config.json）..."
-if ! python config_ui.py; then
-  echo "GUI 启动失败，自动打开 config.json 进行手动编辑..."
-  open -a TextEdit "$(pwd)/config.json"
-fi
+echo "正在打开 Web 配置界面..."
+python config_web.py

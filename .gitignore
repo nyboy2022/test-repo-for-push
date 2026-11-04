@@ -4,16 +4,22 @@ config.json
 .env.*
 !.env.example
 
+# Runtime state and logs
+runtime_status.json
+admin_state.json
+backfill_sent.json
+*.log
+*.log.*
+*.pid
+logs_archive/
+
 # Python
 __pycache__/
 *.py[cod]
 .venv/
+.venv-win/
 .venv311/
 venv/
-
-# Runtime files
-*.log
-*.pid
 
 # Local editor / agent settings
 .claude/

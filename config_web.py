@@ -1,558 +1,326 @@
-"""
-Discord Channel Message Forwarder - Web 配置界面
-访问 http://127.0.0.1:5151 在浏览器中编辑配置、启动/停止转发、查看实时日志
-"""
+"""Local-only browser administration console."""
+from __future__ import annotations
 
+import atexit
+import ctypes
 import json
 import os
-import signal
+import re
+import secrets
 import subprocess
 import sys
 import threading
 import time
 import webbrowser
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
+from flask import Flask, jsonify, render_template, request
 
-from flask import Flask, jsonify, render_template_string, request
+from redaction import redact, redact_value
 
-
-BASE_DIR = Path(__file__).parent
-CONFIG_PATH = BASE_DIR / "config.json"
-FORWARDER_PATH = BASE_DIR / "discord_forwarder.py"
-HOST = "127.0.0.1"
-PORT = 5151
-
-app = Flask(__name__)
-
-_proc_lock = threading.Lock()
-_proc: subprocess.Popen | None = None
-_log_buf: deque[str] = deque(maxlen=1000)
-_log_seq = 0
-_log_lock = threading.Lock()
-
-
-def append_log(line: str) -> None:
-    global _log_seq
-    with _log_lock:
-        _log_seq += 1
-        _log_buf.append(f"{_log_seq}\t{line.rstrip()}")
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = BASE_DIR / "config.json"; STATUS_PATH = BASE_DIR / "runtime_status.json"
+FORWARDER_PATH = BASE_DIR / "discord_forwarder.py"; AUDIT_PATH = BASE_DIR / "admin_audit.log"
+ADMIN_STATE_PATH = BASE_DIR / "admin_state.json"
+HOST = "127.0.0.1"; PORT = 5151
+# A page on another site can point its own domain at 127.0.0.1, so the address alone proves nothing.
+ALLOWED_HOSTNAMES = {"127.0.0.1", "localhost", "[::1]"}
+EXIT_MESSAGES = {2: "所有账号的 Token 都无效或已失效", 3: "已有另一个转发进程在运行，请先关闭它"}
+app = Flask(__name__); app.config["MAX_CONTENT_LENGTH"] = 256 * 1024
+ADMIN_TOKEN = secrets.token_urlsafe(32)
+_proc: subprocess.Popen | None = None; _proc_started_at: float | None = None; _intentional_stop = False
+_last_exit_code: int | None = None; _restart_blocked = False
+_lock = threading.RLock(); _logs: deque[dict] = deque(maxlen=1500); _seq = 0
+_fast_failures: deque[float] = deque(maxlen=3)
+_intentional_pids: set[int] = set()
+_instance_mutex = None
 
 
-def load_config() -> dict:
-    if CONFIG_PATH.exists():
+def audit(action: str, detail: str = "") -> None:
+    with AUDIT_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\t{action}\t{redact(detail)[:300]}\n")
+
+
+def append_log(text: str) -> None:
+    global _seq
+    # Never let credentials escape through the browser log viewer.
+    _seq += 1; _logs.append({"seq": _seq, "time": time.strftime("%H:%M:%S"), "text": redact(text).rstrip()})
+
+
+def load_config_raw() -> dict:
+    try: return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): return {"user_token": "", "forward_rules": [], "debug": False, "options": {}}
+
+
+def stored_accounts(data: dict) -> list[dict]:
+    accounts = data.get("accounts")
+    if isinstance(accounts, list) and accounts:
+        return [{"id": str(item.get("id", "")).strip(), "name": str(item.get("name", "")).strip(), "user_token": str(item.get("user_token", "")).strip()} for item in accounts if isinstance(item, dict)]
+    return [{"id": "default", "name": "主账号", "user_token": str(data.get("user_token", "")).strip()}]
+
+
+def webhook_id_of(url: str) -> str:
+    """The numeric ID is not secret; only the part after it is."""
+    parts = urlparse(url).path.split("/")
+    return parts[3] if len(parts) > 3 else ""
+
+
+def public_config() -> dict:
+    data = load_config_raw(); options = data.get("options") or {}; accounts = stored_accounts(data); default_id = accounts[0]["id"] if accounts else "default"
+    public_accounts = [{"id": item["id"], "name": item["name"] or item["id"], "token_configured": bool(item["user_token"]), "token_hint": ("••••" + item["user_token"][-4:]) if item["user_token"] else ""} for item in accounts]
+    rules = []
+    for item in data.get("forward_rules", []):
+        channel_id = str(item.get("channel_id", "")); url = str(item.get("webhook_url", ""))
+        rules.append({"account_id": str(item.get("account_id") or default_id), "channel_id": channel_id, "note": str(item.get("note", "")), "webhook_id": webhook_id_of(url), "webhook_configured": bool(url), "webhook_hint": ("••••" + url[-6:]) if url else "", "allow_automated": bool(item.get("allow_automated", False))})
+    primary = accounts[0]["user_token"] if accounts else ""
+    return {"accounts": public_accounts, "token_configured": bool(primary), "token_hint": ("••••" + primary[-4:]) if primary else "", "forward_rules": rules, "debug": bool(data.get("debug", False)), "options": {"ignore_bots": bool(options.get("ignore_bots", True)), "max_retries": int(options.get("max_retries", 4)), "queue_size": int(options.get("queue_size", 500)), "auto_restart": bool(options.get("auto_restart", True)), "auto_start": bool(options.get("auto_start", True))}}
+
+
+def valid_webhook(url: str) -> bool:
+    try: value = urlparse(url)
+    except ValueError: return False
+    return value.scheme == "https" and value.hostname in {"discord.com", "discordapp.com", "ptb.discord.com", "canary.discord.com", "ptb.discordapp.com", "canary.discordapp.com"} and value.path.startswith("/api/webhooks/") and len(value.path.split("/")) >= 5
+
+
+def normalize_config(payload: dict) -> dict:
+    current = load_config_raw(); current_accounts = {item["id"]: item for item in stored_accounts(current)}
+    incoming_accounts = payload.get("accounts")
+    if incoming_accounts is None:
+        accounts = stored_accounts(current)
+        if payload.get("user_token"):
+            accounts[0]["user_token"] = str(payload["user_token"]).strip()
+    else:
+        if not isinstance(incoming_accounts, list) or not incoming_accounts: raise ValueError("至少需要一个 Discord 账号")
+        accounts = []
+        for index, item in enumerate(incoming_accounts):
+            if not isinstance(item, dict): raise ValueError("账号配置格式无效")
+            account_id = str(item.get("id", "")).strip(); name = str(item.get("name", "")).strip() or f"账号 {index + 1}"
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", account_id): raise ValueError("账号 ID 格式无效")
+            token = str(item.get("user_token", "")).strip() or str(current_accounts.get(account_id, {}).get("user_token", "")).strip()
+            if len(token) < 20: raise ValueError(f"{name} 的 User Token 未配置或格式无效")
+            accounts.append({"id": account_id, "name": name[:40], "user_token": token})
+    account_ids = {item["id"] for item in accounts}
+    if len(account_ids) != len(accounts): raise ValueError("账号 ID 不能重复")
+    default_id = accounts[0]["id"]
+    current_default = stored_accounts(current)[0]["id"]
+    existing = {(str(item.get("account_id") or current_default), str(item.get("channel_id", "")).strip()): str(item.get("webhook_url", "")).strip() for item in current.get("forward_rules", [])}
+    # Moving a rule to another account keeps its webhook when the channel has only one.
+    urls_by_channel: dict[str, set[str]] = {}
+    for (_, channel), url in existing.items(): urls_by_channel.setdefault(channel, set()).add(url)
+    rules = []; seen: set[tuple[str, int]] = set()
+    for item in payload.get("forward_rules", []):
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {"user_token": "", "forward_rules": [], "debug": True}
+            account_id = str(item.get("account_id") or default_id).strip(); channel_text = str(item.get("channel_id", "")).strip(); channel_id = int(channel_text)
+            only_url = next(iter(urls_by_channel[channel_text])) if len(urls_by_channel.get(channel_text, ())) == 1 else ""
+            url = str(item.get("webhook_url", "")).strip() or existing.get((account_id, channel_text), "") or only_url
+        except (AttributeError, TypeError, ValueError): raise ValueError("频道 ID 必须是数字")
+        if account_id not in account_ids: raise ValueError(f"频道 {channel_id} 未选择有效账号")
+        key = (account_id, channel_id)
+        if channel_id <= 0 or key in seen: raise ValueError("同一账号的频道 ID 无效或重复")
+        if not valid_webhook(url): raise ValueError(f"频道 {channel_id} 的 Webhook 地址无效")
+        rule = {"account_id": account_id, "channel_id": str(channel_id), "webhook_url": url, "allow_automated": bool(item.get("allow_automated", False))}
+        note = str(item.get("note", "")).strip()[:60]
+        if note: rule["note"] = note
+        seen.add(key); rules.append(rule)
+    if not rules: raise ValueError("至少需要一条转发规则")
+    options = payload.get("options") or {}
+    return {"user_token": accounts[0]["user_token"], "accounts": accounts, "forward_rules": rules, "debug": bool(payload.get("debug", False)), "options": {"ignore_bots": bool(options.get("ignore_bots", True)), "max_retries": max(0, min(int(options.get("max_retries", 4)), 10)), "queue_size": max(10, min(int(options.get("queue_size", 500)), 5000)), "auto_restart": bool(options.get("auto_restart", True)), "auto_start": bool(options.get("auto_start", True))}}
 
 
 def save_config(data: dict) -> None:
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    temporary = CONFIG_PATH.with_suffix(".tmp"); temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"); temporary.replace(CONFIG_PATH)
 
 
-def is_valid_webhook_url(value: str) -> bool:
+def is_running() -> bool: return bool(_proc and _proc.poll() is None)
+
+
+def read_runtime() -> dict:
     try:
-        parsed = urlparse(value)
-    except ValueError:
-        return False
-
-    if parsed.scheme not in {"http", "https"}:
-        return False
-
-    host = (parsed.netloc or "").lower()
-    allowed_hosts = {
-        "discord.com",
-        "discordapp.com",
-        "ptb.discord.com",
-        "canary.discord.com",
-        "ptb.discordapp.com",
-        "canary.discordapp.com",
-    }
-    if host not in allowed_hosts:
-        return False
-
-    return parsed.path.startswith("/api/webhooks/")
+        data = redact_value(json.loads(STATUS_PATH.read_text(encoding="utf-8"))); data["stale"] = time.time() - float(data.get("updated_at", 0)) > 30; return data
+    except (OSError, ValueError, json.JSONDecodeError): return {}
 
 
-def normalize_payload(payload: dict) -> dict:
-    token = str(payload.get("user_token", "")).strip()
-    debug = bool(payload.get("debug", True))
-    rules_in = payload.get("forward_rules", []) or []
-    rules_out = []
-    errors = []
-    seen_channel_ids: set[str] = set()
+def config_changed_since_start() -> bool:
+    """Saved settings only apply after a restart, so the page has to say when one is pending."""
+    if not is_running() or _proc_started_at is None: return False
+    try: return CONFIG_PATH.stat().st_mtime > _proc_started_at
+    except OSError: return False
 
-    for index, r in enumerate(rules_in, start=1):
-        if not isinstance(r, dict):
-            errors.append(f"第 {index} 行不是有效对象")
+
+def remember_desired_state(running: bool) -> None:
+    """A manual stop has to survive the next launch of this console."""
+    try: ADMIN_STATE_PATH.write_text(json.dumps({"forwarder_running": running}), encoding="utf-8")
+    except OSError as exc: append_log(f"[管理端] 无法保存运行状态: {exc}")
+
+
+def desired_running() -> bool:
+    try: return bool(json.loads(ADMIN_STATE_PATH.read_text(encoding="utf-8")).get("forwarder_running", True))
+    except (OSError, ValueError, AttributeError): return True
+
+
+def reader(proc: subprocess.Popen, started_at: float) -> None:
+    global _last_exit_code, _restart_blocked
+    if proc.stdout:
+        for line in proc.stdout: append_log(line)
+    code = proc.wait(); _last_exit_code = code; audit("process_exit", str(code))
+    append_log(f"[管理端] 转发进程已退出，代码 {code}" + (f"：{EXIT_MESSAGES[code]}" if code in EXIT_MESSAGES else ""))
+    intentional = proc.pid in _intentional_pids
+    _intentional_pids.discard(proc.pid)
+    if intentional:
+        return
+    if time.time() - started_at < 15:
+        _fast_failures.append(time.time())
+    else:
+        _fast_failures.clear()
+    _restart_blocked = len(_fast_failures) == 3 and _fast_failures[-1] - _fast_failures[0] < 60
+
+
+def reset_restart_breaker() -> None:
+    global _restart_blocked
+    _fast_failures.clear(); _restart_blocked = False
+
+
+def start_process() -> int:
+    global _proc, _proc_started_at, _intentional_stop, _last_exit_code, _restart_blocked
+    with _lock:
+        if is_running(): return int(_proc.pid)
+        raw = load_config_raw(); normalize_config({"user_token": "", "forward_rules": raw.get("forward_rules", []), "debug": raw.get("debug", False), "options": raw.get("options", {})})
+        _intentional_stop = False; _last_exit_code = None; _restart_blocked = False; env = os.environ.copy(); env.update(PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", PYTHONUTF8="1", TZ="UTC")
+        _proc = subprocess.Popen([sys.executable, str(FORWARDER_PATH)], cwd=BASE_DIR, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1)
+        _proc_started_at = time.time(); threading.Thread(target=reader, args=(_proc, _proc_started_at), daemon=True).start(); append_log(f"[管理端] 已启动 PID {_proc.pid}"); audit("start", f"pid={_proc.pid}"); remember_desired_state(True); return int(_proc.pid)
+
+
+def stop_process(remember: bool = True) -> None:
+    global _intentional_stop
+    with _lock:
+        _intentional_stop = True
+        if remember: remember_desired_state(False)
+        if not is_running(): return
+        assert _proc is not None; _intentional_pids.add(_proc.pid); _proc.terminate()
+        try: _proc.wait(timeout=8)
+        except subprocess.TimeoutExpired: _proc.kill(); _proc.wait(timeout=3)
+        audit("stop")
+
+
+def supervisor() -> None:
+    while True:
+        time.sleep(3); options = load_config_raw().get("options") or {}
+        if _restart_blocked:
             continue
-        cid = str(r.get("channel_id", "")).strip()
-        wh = str(r.get("webhook_url", "")).strip()
-
-        if not cid and not wh:
-            continue
-        if not cid:
-            errors.append(f"第 {index} 行缺少频道 ID")
-            continue
-        if not cid.isdigit():
-            errors.append(f"第 {index} 行频道 ID 不是纯数字")
-            continue
-        if cid in seen_channel_ids:
-            errors.append(f"第 {index} 行频道 ID 重复: {cid}")
-            continue
-        if not wh:
-            errors.append(f"第 {index} 行缺少 Webhook URL")
-            continue
-        if not is_valid_webhook_url(wh):
-            errors.append(f"第 {index} 行 Webhook URL 格式无效")
-            continue
-
-        seen_channel_ids.add(cid)
-        rules_out.append({"channel_id": cid, "webhook_url": wh})
-
-    if errors:
-        raise ValueError("；".join(errors))
-
-    return {"user_token": token, "forward_rules": rules_out, "debug": debug}
+        if _proc and not is_running() and not _intentional_stop and bool(options.get("auto_restart", True)):
+            append_log("[管理端] 检测到异常退出，正在自动重启")
+            try: start_process()
+            except Exception as exc: append_log(f"[管理端] 自动重启失败: {type(exc).__name__}: {exc}")
 
 
-def reader_thread(proc: subprocess.Popen) -> None:
-    assert proc.stdout is not None
-    for raw in iter(proc.stdout.readline, ""):
-        if not raw:
-            break
-        append_log(raw)
-    proc.stdout.close()
-    rc = proc.wait()
-    append_log(f"[进程已退出] exit code = {rc}")
+def autostart() -> None:
+    options = load_config_raw().get("options") or {}
+    if not bool(options.get("auto_start", True)) or not desired_running(): return
+    try: start_process(); append_log("[管理端] 已自动开始转发")
+    except Exception as exc: append_log(f"[管理端] 自动启动失败: {type(exc).__name__}: {exc}")
 
 
-# ==================== HTML ====================
-INDEX_HTML = r"""
-<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Discord Channel Message Forwarder - 配置</title>
-<style>
-:root {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --panel2: #1f242d;
-  --border: #2a313d;
-  --text: #e6e8ec;
-  --muted: #8b94a3;
-  --accent: #5865f2;
-  --accent-hov: #6b78ff;
-  --danger: #ed4245;
-  --ok: #3ba55d;
-  --warn: #faa61a;
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  background: var(--bg); color: var(--text); font-size: 14px;
-}
-.wrap { max-width: 980px; margin: 0 auto; padding: 24px 20px 40px; }
-h1 { font-size: 18px; margin: 0 0 4px; }
-.sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
-.card {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-  padding: 16px 18px; margin-bottom: 16px;
-}
-.card h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
-label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-input[type="text"], input[type="password"] {
-  width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border);
-  background: var(--panel2); color: var(--text); font-size: 13px; font-family: inherit;
-}
-input:focus { outline: none; border-color: var(--accent); }
-.field-err { border-color: var(--danger) !important; box-shadow: 0 0 0 1px rgba(237, 66, 69, 0.28); }
-.hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
-.row { display: grid; grid-template-columns: 220px 1fr 70px; gap: 8px; margin-bottom: 6px; align-items: center; }
-.row .head { color: var(--muted); font-size: 11px; padding: 0 2px; }
-button {
-  border: 0; border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer;
-  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-  font-family: inherit;
-}
-button:hover { background: #262d39; }
-button.primary { background: var(--accent); border-color: var(--accent); }
-button.primary:hover { background: var(--accent-hov); border-color: var(--accent-hov); }
-button.danger { background: var(--danger); border-color: var(--danger); }
-button.danger:hover { filter: brightness(1.1); }
-button.ghost { background: transparent; }
-button:disabled { opacity: 0.45; cursor: not-allowed; }
-.actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.checkbox { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); cursor: pointer; }
-.token-wrap { position: relative; }
-.token-wrap button { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); padding: 3px 8px; font-size: 11px; }
-.status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
-.dot.run { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-.dot.stop { background: var(--muted); }
-.toast {
-  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-  background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
-  padding: 8px 14px; font-size: 12px; opacity: 0; transition: opacity .2s;
-  pointer-events: none; z-index: 100;
-}
-.toast.show { opacity: 1; }
-.toast.ok { border-color: var(--ok); }
-.toast.err { border-color: var(--danger); }
-#log {
-  background: #0a0c10; border: 1px solid var(--border); border-radius: 6px;
-  height: 320px; overflow-y: auto; padding: 10px 12px; font-family: ui-monospace, "SF Mono", Consolas, monospace;
-  font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
-}
-#log .empty { color: var(--muted); font-style: italic; }
-.flex-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>Discord Channel Message Forwarder — 配置</h1>
-  <div class="sub">在浏览器里编辑配置、启动 / 停止转发、查看实时日志</div>
-
-  <div class="card">
-    <h2>User Token</h2>
-    <div class="token-wrap">
-      <input id="token" type="password" placeholder="普通用户 Token（self-bot，高风险）" autocomplete="off">
-      <button type="button" id="toggle-token">显示</button>
-    </div>
-    <div class="hint">⚠️ self-bot 可能违反 Discord 规则并导致封号；Token 等同于密码，切勿外泄</div>
-  </div>
-
-  <div class="card">
-    <div class="flex-between" style="margin-bottom: 10px;">
-      <h2 style="margin:0;">转发规则(每个频道对应一个 Webhook)</h2>
-      <button type="button" id="add-rule">+ 添加规则</button>
-    </div>
-    <div class="row head">
-      <div>频道 ID</div>
-      <div>Webhook URL</div>
-      <div></div>
-    </div>
-    <div id="rules"></div>
-    <div class="hint">右键频道 → 复制 ID  |  频道设置 → 集成 → Webhook → 复制链接</div>
-  </div>
-
-  <div class="card">
-    <label class="checkbox">
-      <input type="checkbox" id="debug">
-      开启调试模式(控制台打印收到的消息和频道 ID)
-    </label>
-  </div>
-
-  <div class="card">
-    <div class="flex-between">
-      <div class="actions">
-        <button class="primary" id="save">保存配置</button>
-        <button class="primary" id="start">启动转发</button>
-        <button class="danger" id="stop" disabled>停止</button>
-        <button class="ghost" id="clear-log">清空日志</button>
-      </div>
-      <div class="status"><span class="dot stop" id="status-dot"></span><span id="status-text">未运行</span></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>运行日志</h2>
-    <div id="log"><span class="empty">(尚未启动)</span></div>
-  </div>
-</div>
-
-<div id="toast" class="toast"></div>
-
-<script>
-const $ = (s) => document.querySelector(s);
-const rulesEl = $("#rules");
-
-function addRule(channel_id = "", webhook_url = "") {
-  const row = document.createElement("div");
-  row.className = "row";
-  row.innerHTML = `
-    <input type="text" class="cid" placeholder="例如 922638571679141898">
-    <input type="text" class="wh" placeholder="https://discord.com/api/webhooks/...">
-    <button type="button" class="del">删除</button>
-  `;
-  row.querySelector(".cid").value = channel_id;
-  row.querySelector(".wh").value = webhook_url;
-  row.querySelector(".del").addEventListener("click", () => row.remove());
-  rulesEl.appendChild(row);
-}
-
-function gatherConfig() {
-  const rules = [...rulesEl.querySelectorAll(".row")].map(r => ({
-    channel_id: r.querySelector(".cid").value.trim(),
-    webhook_url: r.querySelector(".wh").value.trim(),
-  })).filter(r => r.channel_id || r.webhook_url);
-  return {
-    user_token: $("#token").value.trim(),
-    forward_rules: rules,
-    debug: $("#debug").checked,
-  };
-}
-
-function clearRuleErrors() {
-  for (const input of rulesEl.querySelectorAll(".cid, .wh")) input.classList.remove("field-err");
-}
-
-function validateRules() {
-  clearRuleErrors();
-  const errors = [];
-  const seen = new Set();
-
-  [...rulesEl.querySelectorAll(".row")].forEach((row, idx) => {
-    const cidInput = row.querySelector(".cid");
-    const whInput = row.querySelector(".wh");
-    const cid = cidInput.value.trim();
-    const wh = whInput.value.trim();
-    const rowNo = idx + 1;
-
-    if (!cid && !wh) return;
-    if (!cid) {
-      cidInput.classList.add("field-err");
-      errors.push(`第 ${rowNo} 行缺少频道 ID`);
-      return;
-    }
-    if (!/^\d+$/.test(cid)) {
-      cidInput.classList.add("field-err");
-      errors.push(`第 ${rowNo} 行频道 ID 不是纯数字`);
-      return;
-    }
-    if (seen.has(cid)) {
-      cidInput.classList.add("field-err");
-      errors.push(`第 ${rowNo} 行频道 ID 重复`);
-      return;
-    }
-    if (!wh) {
-      whInput.classList.add("field-err");
-      errors.push(`第 ${rowNo} 行缺少 Webhook URL`);
-      return;
-    }
-    if (!/^https?:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/.+/i.test(wh)) {
-      whInput.classList.add("field-err");
-      errors.push(`第 ${rowNo} 行 Webhook URL 格式无效`);
-      return;
-    }
-
-    seen.add(cid);
-  });
-
-  return errors;
-}
-
-let toastTimer = null;
-function toast(msg, kind = "") {
-  const el = $("#toast");
-  el.textContent = msg;
-  el.className = "toast show " + kind;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = "toast"; }, 1800);
-}
-
-async function loadConfig() {
-  const r = await fetch("/api/config");
-  const cfg = await r.json();
-  $("#token").value = cfg.user_token || "";
-  $("#debug").checked = cfg.debug !== false;
-  rulesEl.innerHTML = "";
-  (cfg.forward_rules || []).forEach(rule => addRule(rule.channel_id, rule.webhook_url));
-  if (rulesEl.children.length === 0) addRule();
-}
-
-async function saveConfig() {
-  const errors = validateRules();
-  if (errors.length) {
-    toast(errors[0], "err");
-    return false;
-  }
-
-  const r = await fetch("/api/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(gatherConfig()),
-  });
-  const j = await r.json();
-  if (j.ok) toast("已保存 ✓", "ok"); else toast("保存失败: " + (j.error || ""), "err");
-  return j.ok;
-}
-
-async function startForwarder() {
-  if (!await saveConfig()) return;
-  const r = await fetch("/api/start", { method: "POST" });
-  const j = await r.json();
-  if (j.ok) toast("已启动 ✓", "ok"); else toast(j.error || "启动失败", "err");
-}
-
-async function stopForwarder() {
-  const r = await fetch("/api/stop", { method: "POST" });
-  const j = await r.json();
-  if (j.ok) toast("已停止", "ok"); else toast(j.error || "停止失败", "err");
-}
-
-let lastSeq = 0;
-let logEmpty = true;
-async function pollLogs() {
-  try {
-    const r = await fetch(`/api/logs?since=${lastSeq}`);
-    const j = await r.json();
-    if (j.lines && j.lines.length) {
-      const log = $("#log");
-      if (logEmpty) { log.innerHTML = ""; logEmpty = false; }
-      const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
-      for (const item of j.lines) {
-        lastSeq = item.seq;
-        const div = document.createElement("div");
-        div.textContent = item.text;
-        log.appendChild(div);
-      }
-      while (log.children.length > 800) log.removeChild(log.firstChild);
-      if (atBottom) log.scrollTop = log.scrollHeight;
-    }
-    const dot = $("#status-dot"), txt = $("#status-text");
-    if (j.running) {
-      dot.className = "dot run"; txt.textContent = "运行中";
-      $("#start").disabled = true; $("#stop").disabled = false;
-    } else {
-      dot.className = "dot stop"; txt.textContent = "未运行";
-      $("#start").disabled = false; $("#stop").disabled = true;
-    }
-  } catch (e) {}
-}
-
-$("#add-rule").addEventListener("click", () => addRule());
-$("#save").addEventListener("click", saveConfig);
-$("#start").addEventListener("click", startForwarder);
-$("#stop").addEventListener("click", stopForwarder);
-$("#clear-log").addEventListener("click", () => {
-  $("#log").innerHTML = '<span class="empty">(已清空)</span>'; logEmpty = true;
-});
-$("#toggle-token").addEventListener("click", () => {
-  const i = $("#token");
-  if (i.type === "password") { i.type = "text"; $("#toggle-token").textContent = "隐藏"; }
-  else { i.type = "password"; $("#toggle-token").textContent = "显示"; }
-});
-
-loadConfig();
-setInterval(pollLogs, 1000);
-pollLogs();
-</script>
-</body>
-</html>
-"""
+def probe_webhook(url: str) -> dict:
+    """Read the webhook's public details. GET never posts anything to the channel."""
+    import requests
+    try:
+        response = requests.get(url, timeout=(5, 10))
+    except requests.RequestException as exc:
+        return {"ok": False, "status": None, "error": redact(type(exc).__name__)}
+    if response.status_code != 200:
+        return {"ok": False, "status": response.status_code, "error": f"HTTP {response.status_code}"}
+    data = response.json()
+    return {"ok": True, "status": 200, "name": str(data.get("name") or ""), "channel_id": str(data.get("channel_id") or ""), "guild_id": str(data.get("guild_id") or "")}
 
 
-# ==================== 路由 ====================
+def check_webhooks() -> dict:
+    rules = load_config_raw().get("forward_rules", [])
+    urls = {webhook_id_of(str(item.get("webhook_url", ""))): str(item.get("webhook_url", "")) for item in rules if valid_webhook(str(item.get("webhook_url", "")))}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = dict(zip(urls, pool.map(probe_webhook, urls.values())))
+    sources = {str(item.get("channel_id", "")) for item in rules}
+    for result in results.values():
+        result["loop_risk"] = bool(result.get("channel_id")) and result.get("channel_id") in sources
+    return results
+
+
+@app.before_request
+def guard():
+    if request.remote_addr not in {"127.0.0.1", "::1"}: return jsonify({"ok": False, "error": "仅允许本机访问"}), 403
+    if request.host.rsplit(":", 1)[0] not in ALLOWED_HOSTNAMES and request.host not in ALLOWED_HOSTNAMES: return jsonify({"ok": False, "error": "请求来源无效"}), 403
+    if request.method in {"POST", "PUT", "DELETE", "PATCH"} and request.headers.get("X-Admin-Token") != ADMIN_TOKEN: return jsonify({"ok": False, "error": "请求验证失败，请刷新页面"}), 403
+
+
+@app.after_request
+def security_headers(response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    return response
+
+
 @app.get("/")
-def index():
-    return render_template_string(INDEX_HTML)
-
+def index(): return render_template("index.html", admin_token=ADMIN_TOKEN)
 
 @app.get("/api/config")
-def api_get_config():
-    return jsonify(load_config())
+def api_config(): return jsonify({"ok": True, "config": public_config()})
 
-
-@app.post("/api/config")
-def api_save_config():
+@app.put("/api/config")
+def api_save():
     try:
-        data = normalize_payload(request.get_json(force=True) or {})
-        save_config(data)
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 400
+        data = normalize_config(request.get_json(silent=False) or {}); save_config(data); audit("config_save", f"rules={len(data['forward_rules'])}"); return jsonify({"ok": True, "config": public_config()})
+    except (TypeError, ValueError) as exc: return jsonify({"ok": False, "error": str(exc)}), 400
 
+@app.get("/api/status")
+def api_status():
+    return jsonify({"ok": True, "running": is_running(), "pid": _proc.pid if is_running() else None, "started_at": _proc_started_at, "last_exit_code": _last_exit_code, "exit_message": EXIT_MESSAGES.get(_last_exit_code), "restart_blocked": _restart_blocked, "restart_required": config_changed_since_start(), "runtime": read_runtime()})
 
-@app.post("/api/start")
-def api_start():
-    global _proc
-    with _proc_lock:
-        if _proc and _proc.poll() is None:
-            return jsonify({"ok": False, "error": "已经在运行中"}), 400
+@app.post("/api/process/<action>")
+def api_process(action: str):
+    try:
+        if action == "start": reset_restart_breaker(); return jsonify({"ok": True, "pid": start_process()})
+        if action == "stop": stop_process(); return jsonify({"ok": True})
+        if action == "restart": stop_process(); reset_restart_breaker(); pid = start_process(); audit("restart", f"pid={pid}"); return jsonify({"ok": True, "pid": pid})
+        return jsonify({"ok": False, "error": "未知操作"}), 404
+    except Exception as exc: return jsonify({"ok": False, "error": redact(f"{type(exc).__name__}: {exc}")}), 400
 
-        cfg = load_config()
-        if not cfg.get("user_token") or not cfg.get("forward_rules"):
-            return jsonify({"ok": False, "error": "请先填写 Token 并添加至少一条转发规则"}), 400
-
-        _log_buf.clear()
-        append_log("[Web] 正在启动 discord_forwarder.py ...")
-
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
-        try:
-            _proc = subprocess.Popen(
-                [sys.executable, str(FORWARDER_PATH)],
-                cwd=str(BASE_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=1,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-            )
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
-
-        threading.Thread(target=reader_thread, args=(_proc,), daemon=True).start()
-        return jsonify({"ok": True, "pid": _proc.pid})
-
-
-@app.post("/api/stop")
-def api_stop():
-    global _proc
-    with _proc_lock:
-        if not _proc or _proc.poll() is not None:
-            return jsonify({"ok": False, "error": "进程未在运行"}), 400
-        try:
-            if os.name == "nt":
-                _proc.terminate()
-            else:
-                _proc.send_signal(signal.SIGTERM)
-            try:
-                _proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                _proc.kill()
-            append_log("[Web] 已停止")
-            return jsonify({"ok": True})
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
-
+@app.post("/api/webhooks/check")
+def api_check_webhooks():
+    return jsonify({"ok": True, "results": check_webhooks()})
 
 @app.get("/api/logs")
 def api_logs():
-    since = int(request.args.get("since", 0))
-    with _log_lock:
-        lines = []
-        for entry in _log_buf:
-            seq_str, _, text = entry.partition("\t")
-            seq = int(seq_str)
-            if seq > since:
-                lines.append({"seq": seq, "text": text})
-    running = bool(_proc and _proc.poll() is None)
-    return jsonify({"lines": lines, "running": running})
+    try: since = max(0, int(request.args.get("since", 0)))
+    except ValueError: since = 0
+    return jsonify({"ok": True, "lines": [line for line in _logs if line["seq"] > since]})
 
 
-def open_browser_later(url: str) -> None:
-    time.sleep(0.8)
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+@app.get("/api/diagnostics")
+def api_diagnostics():
+    config = load_config_raw()
+    try: log_size = (BASE_DIR / "forwarder.log").stat().st_size
+    except OSError: log_size = 0
+    return jsonify({"ok": True, "diagnostics": {"python": sys.version.split()[0], "executable": sys.executable, "base_dir": str(BASE_DIR), "config_readable": CONFIG_PATH.is_file(), "token_configured": all(bool(item["user_token"]) for item in stored_accounts(config)), "account_count": len(stored_accounts(config)), "rule_count": len(config.get("forward_rules") or []), "forwarder_exists": FORWARDER_PATH.is_file(), "platform": sys.platform, "log_bytes": log_size}})
 
 
-if __name__ == "__main__":
-    url = f"http://{HOST}:{PORT}"
-    print(f"配置界面: {url}")
-    print("(关闭此窗口或按 Ctrl+C 退出)")
-    threading.Thread(target=open_browser_later, args=(url,), daemon=True).start()
-    # 关掉 reloader,避免 subprocess / 线程被重复创建
-    app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
+def main() -> None:
+    global _instance_mutex
+    if os.name == "nt":
+        _instance_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\DiscordForwarderAdmin-5151")
+        if ctypes.windll.kernel32.GetLastError() == 183:
+            webbrowser.open(f"http://{HOST}:{PORT}")
+            print("管理后台已经运行，已打开现有页面。")
+            return
+    threading.Thread(target=supervisor, daemon=True).start()
+    autostart()
+    if os.environ.get("DISCORD_FORWARDER_NO_BROWSER") != "1":
+        threading.Thread(target=lambda: (time.sleep(.8), webbrowser.open(f"http://{HOST}:{PORT}")), daemon=True).start()
+    print(f"管理后台：http://{HOST}:{PORT}"); app.run(host=HOST, port=PORT, debug=False, use_reloader=False, threaded=True)
+
+
+atexit.register(stop_process, remember=False)
+if __name__ == "__main__": main()
